@@ -1,0 +1,112 @@
+init_weights:
+apply_prior_correction: false
+prior_source: val
+prior_alpha: 30
+run_name: ${hydra:job.name}-${now:%Y%m%d-%H%M%S}
+
+model:
+  _target_: src.model.BCResNet
+  n_mels: 64
+  n_classes: 5
+  base_width: 8
+  width_mult: 1.0
+  widths: [5, 6, 7, 8]
+  stages: [1, 1, 2, 2]
+  ssn_subbands: 3
+  dropout: 0.05
+  classifier_hidden: 24
+  final_pw_channels: 12
+  se_reduction: 8
+  activation:
+    _target_: torch.nn.SiLU
+
+train_dataloader:
+  _target_: torch.utils.data.DataLoader
+  num_workers: 4
+  batch_size: 128
+  prefetch_factor: 1
+  collate_fn: ${function:src.data.collator}
+  shuffle: True
+  dataset:
+    _target_: src.data.SpotterDataset
+    manifest_path: data/keyword-spotting-mipt-2023/train/manifest_train.csv
+    idx_to_keyword:
+    - 'sber'
+    - 'joy'
+    - 'afina'
+    - 'salut'
+    - 'filler'
+    transforms:
+      - _target_: torchaudio.transforms.MelSpectrogram
+        sample_rate: 16000
+        n_fft: 400
+        win_length: 400
+        hop_length: 160
+        n_mels: ${model.n_mels}
+      - _target_: src.data.SpecScaler
+
+val_dataloader:
+  _target_: torch.utils.data.DataLoader
+  num_workers: ${train_dataloader.num_workers}
+  batch_size: ${train_dataloader.batch_size}
+  prefetch_factor: ${train_dataloader.prefetch_factor}
+  collate_fn: ${train_dataloader.collate_fn}
+  shuffle: False
+  dataset:
+    _target_: src.data.SpotterDataset
+    manifest_path: data/keyword-spotting-mipt-2023/train/manifest_val.csv
+    idx_to_keyword: ${train_dataloader.dataset.idx_to_keyword}
+    transforms:
+      - ${getindex:${train_dataloader.dataset.transforms}, 0}
+      - ${getindex:${train_dataloader.dataset.transforms}, -1}
+
+predict_dataloader:
+  _target_: torch.utils.data.DataLoader
+  num_workers: 1
+  batch_size: ${val_dataloader.batch_size}
+  prefetch_factor: ${val_dataloader.prefetch_factor}
+  collate_fn: ${val_dataloader.collate_fn}
+  shuffle: False
+  dataset:
+    _target_: ${val_dataloader.dataset._target_}
+    manifest_path: data/keyword-spotting-mipt-2023/test/manifest.csv
+    idx_to_keyword: ${val_dataloader.dataset.idx_to_keyword}
+    transforms: ${val_dataloader.dataset.transforms}
+    test: True
+
+trainer:
+  _target_: pytorch_lightning.Trainer
+  val_check_interval: 0.5
+  check_val_every_n_epoch: 1
+  log_every_n_steps: 5
+  precision: 32
+  accumulate_grad_batches: 1
+  gradient_clip_val: 1.0
+  accelerator: auto
+  max_steps: 8000
+  devices: 1
+  callbacks: ${callbacks}
+
+logger:
+  _target_: pytorch_lightning.loggers.WandbLogger
+  project: keyword-spotting
+  save_dir: wandb
+  log_model: True
+  name: ${run_name}
+  tags:
+    - bcresnet
+    - slim
+    - se
+
+callbacks:
+  - _target_: pytorch_lightning.callbacks.ModelCheckpoint
+    dirpath: checkpoints/${run_name}
+    filename: ${run_name}
+    monitor: val/accuracy
+    mode: max
+    save_top_k: 1
+    save_last: True
+
+optim:
+  _target_: torch.optim.Adam
+  lr: 2e-3

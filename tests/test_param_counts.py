@@ -25,11 +25,15 @@ def register_resolvers():
 
 CONFIGS = [
     "bcresnet_slim.yaml",
-    "bcresnet_ref.yaml",
     "conv1d_depthwise.yaml",
     "crnn.yaml",
     "dsresnet_lite.yaml",
     "dsresnet10.yaml",
+    "dsresnet10_plus.yaml",
+    "tcn_se.yaml",
+    "tcn_attn.yaml",
+    "depthwise_gru.yaml",
+    "bcresnet_slim_se.yaml",
     "tcn.yaml",
     "conformer_tiny.yaml",
     "mobilenetv3_small.yaml",

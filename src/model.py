@@ -135,6 +135,25 @@ class SE1d(nn.Module):
         return x * scale
 
 
+class SE2d(nn.Module):
+    def __init__(self, channels: int, reduction: int = 8):
+        super().__init__()
+        hidden = max(1, channels // reduction)
+        self.pool = nn.AdaptiveAvgPool2d(1)
+        self.fc = nn.Sequential(
+            nn.Linear(channels, hidden),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden, channels),
+            nn.Sigmoid(),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        b, c, _, _ = x.shape
+        y = self.pool(x).view(b, c)
+        y = self.fc(y).view(b, c, 1, 1)
+        return x * y
+
+
 class DSResBlock1d(nn.Module):
     def __init__(
         self,
@@ -274,6 +293,61 @@ class DSResNet10(nn.Module):
         return self.head(x)
 
 
+class DepthwiseConvGRUNet(nn.Module):
+    """Depthwise separable conv stack followed by a tiny GRU."""
+
+    def __init__(
+        self,
+        in_features: int,
+        n_classes: int,
+        channels: List[int],
+        activation: nn.Module = nn.SiLU(),
+        kernel_size: int = 5,
+        stride: int = 2,
+        rnn_hidden: int = 18,
+        head_hidden: int = 24,
+    ):
+        super().__init__()
+        features = in_features
+        layers: list[nn.Module] = []
+        for ch in channels:
+            padding = kernel_size // 2
+            layers.extend(
+                [
+                    nn.Conv1d(
+                        in_channels=features,
+                        out_channels=features,
+                        kernel_size=kernel_size,
+                        stride=stride,
+                        padding=padding,
+                        groups=features,
+                        bias=False,
+                    ),
+                    nn.BatchNorm1d(features),
+                    activation,
+                    nn.Conv1d(features, ch, kernel_size=1, bias=False),
+                    nn.BatchNorm1d(ch),
+                    activation,
+                ]
+            )
+            features = ch
+        self.conv = nn.Sequential(*layers)
+        self.rnn = nn.GRU(input_size=features, hidden_size=rnn_hidden, num_layers=1, batch_first=True, bidirectional=True)
+        self.head = nn.Sequential(
+            nn.Linear(rnn_hidden * 2, head_hidden),
+            activation,
+            nn.Linear(head_hidden, n_classes),
+            nn.LogSoftmax(dim=-1),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.conv(x)  # (B, C, T)
+        x = x.transpose(1, 2)  # (B, T, C)
+        y, _ = self.rnn(x)
+        y = y.mean(dim=1)
+        return self.head(y)
+
+
 class TCNBlock(nn.Module):
     def __init__(self, channels: int, dilation: int, kernel_size: int = 5, activation: nn.Module = nn.SiLU()):
         super().__init__()
@@ -303,6 +377,7 @@ class TCNNet(nn.Module):
         dilations: List[int] = [1, 2, 4, 8],
         activation: nn.Module = nn.SiLU(),
         head_hidden: int = 48,
+        se_reduction: int | None = None,
     ):
         super().__init__()
         self.stem = nn.Sequential(
@@ -310,6 +385,7 @@ class TCNNet(nn.Module):
             nn.BatchNorm1d(channels),
             activation,
         )
+        self.stem_se = SE1d(channels, reduction=se_reduction) if se_reduction else None
         self.blocks = nn.Sequential(
             *[TCNBlock(channels, d, kernel_size=5, activation=activation) for d in dilations]
         )
@@ -324,6 +400,8 @@ class TCNNet(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.stem(x)
+        if self.stem_se is not None:
+            x = self.stem_se(x)
         x = self.blocks(x)
         return self.head(x)
 
@@ -412,6 +490,67 @@ class TinyConformerNet(nn.Module):
         x = x.transpose(1, 2)  # (B, T', C)
         x = self.block(x)
         x = x.mean(dim=1)
+        return self.head(x)
+
+
+class SharedWeightSelfAttention1D(nn.Module):
+    """Shared-weight self-attention (SWSA) for 1D sequences."""
+
+    def __init__(self, channels: int, attn_dim: int = 16):
+        super().__init__()
+        self.proj = nn.Linear(channels, attn_dim, bias=False)
+        self.out = nn.Linear(attn_dim, channels, bias=False)
+        self.scale = attn_dim**0.5
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (B, C, T)
+        x_t = x.transpose(1, 2)  # (B, T, C)
+        q = self.proj(x_t)
+        k = q
+        v = q
+        attn = torch.softmax(torch.bmm(q, k.transpose(1, 2)) / self.scale, dim=-1)
+        y = torch.bmm(attn, v)
+        y = self.out(y)  # (B, T, C)
+        y = y.transpose(1, 2)
+        return y
+
+
+class TCNAttentionNet(nn.Module):
+    """TCN backbone with shared-weight attention head."""
+
+    def __init__(
+        self,
+        in_features: int,
+        n_classes: int,
+        channels: int = 22,
+        dilations: List[int] = [1, 2, 4, 8],
+        activation: nn.Module = nn.SiLU(),
+        head_hidden: int = 28,
+        attn_dim: int = 16,
+    ):
+        super().__init__()
+        self.stem = nn.Sequential(
+            nn.Conv1d(in_features, channels, kernel_size=3, padding=1, stride=2),
+            nn.BatchNorm1d(channels),
+            activation,
+        )
+        self.blocks = nn.Sequential(
+            *[TCNBlock(channels, d, kernel_size=5, activation=activation) for d in dilations]
+        )
+        self.attn = SharedWeightSelfAttention1D(channels, attn_dim=attn_dim)
+        self.head = nn.Sequential(
+            nn.AdaptiveAvgPool1d(1),
+            nn.Flatten(),
+            nn.Linear(channels, head_hidden),
+            activation,
+            nn.Linear(head_hidden, n_classes),
+            nn.LogSoftmax(dim=-1),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.stem(x)
+        x = self.blocks(x)
+        x = self.attn(x)
         return self.head(x)
 
 
@@ -697,6 +836,7 @@ class BCResNet(torch.nn.Module):
         activation=torch.nn.ReLU(),
         classifier_hidden: int = 128,
         final_pw_channels: int | None = None,
+        se_reduction: int | None = None,
     ):
         super().__init__()
         self.n_mels = n_mels
@@ -707,6 +847,7 @@ class BCResNet(torch.nn.Module):
             torch.nn.BatchNorm2d(base_width),
             activation,
         )
+        self.front_se = SE2d(base_width, reduction=se_reduction) if se_reduction else None
 
         blocks = []
         in_ch = base_width
@@ -751,6 +892,8 @@ class BCResNet(torch.nn.Module):
             x = spec
 
         x = self.front(x)
+        if self.front_se is not None:
+            x = self.front_se(x)
         x = self.blocks(x)
         x = self.final_dw(x)
         x = self.final_pw(x)
