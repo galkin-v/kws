@@ -1,5 +1,5 @@
-init_weights: lightning_logs/version_11/checkpoints/epoch=10-step=7980.ckpt
-apply_prior_correction: true
+init_weights: lightning_logs/version_1/checkpoints/epoch=10-step=7980.ckpt
+apply_prior_correction: false
 prior_source: val  # 'val' to use val priors as target, 'predict' to use predict/test priors
 prior_alpha: 30
 model:

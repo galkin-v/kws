@@ -97,7 +97,7 @@ def main(conf: omegaconf.DictConfig) -> None:
         else:
             raise KeyError(f"label column not found; available columns: {list(df.columns)}")
 
-    df[["index", "label"]].to_csv("submit_pr.csv", index=False)
+    df[["index", "label"]].to_csv("submit.csv", index=False)
 
 
 if __name__ == "__main__":
