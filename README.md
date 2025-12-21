@@ -6,6 +6,12 @@ constraints:
 * $\le 10^4$ params
 * $\le 10^6$ multiply-accumulate operations per 1 second
 
+**How to beign**
+- run `uv sync`
+- hf download galkinv42/sber-keyword-spotting --repo-type dataset --local-dir data && unzip data/keyword-spotting-mipt-2023.zip -d /data
+
+# Models
+
 ## Baseline
 
 ```bash
