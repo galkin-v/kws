@@ -2,6 +2,7 @@ init_weights: lightning_logs/version_1/checkpoints/epoch=10-step=7980.ckpt
 apply_prior_correction: false
 prior_source: val  # 'val' to use val priors as target, 'predict' to use predict/test priors
 prior_alpha: 30
+run_name: ${hydra:job.name}-${now:%Y%m%d-%H%M%S}
 model:
   _target_: src.model.BCResNet
   # concrete mel-bin size to avoid recursive interpolation with dataloader transforms
@@ -81,10 +82,24 @@ trainer:
   accelerator: auto
   max_steps: 8000
   devices: 1
+  callbacks: ${callbacks}
 
 logger:
-  _target_: pytorch_lightning.loggers.TensorBoardLogger
-  save_dir: .
+  _target_: pytorch_lightning.loggers.WandbLogger
+  project: keyword-spotting
+  save_dir: wandb
+  log_model: True
+  name: ${run_name}
+  tags:
+    - bcresnet
+callbacks:
+  - _target_: pytorch_lightning.callbacks.ModelCheckpoint
+    dirpath: checkpoints/${run_name}
+    filename: ${run_name}
+    monitor: val/accuracy
+    mode: max
+    save_top_k: 1
+    save_last: True
   
 optim:
   _target_: torch.optim.Adam

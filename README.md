@@ -21,8 +21,10 @@ python3 -m venv kws_venv
 pip install -r requirements.txt
 # train
 python run.py ++train_dataloader.dataset.manifest_path=<train_manifest> ++val_dataloader.dataset.manifest_path=<val_manifest> ++predict_dataloader.dataset.manifest_path=<test_manifest>
-# monitor learning curves in tensorboard
-tensorboard --logdir ./lightning_logs
+# monitor learning curves in Weights & Biases (set WANDB_MODE=offline to avoid network)
+# wandb login
+# WANDB_PROJECT=keyword-spotting python run.py --config-name bcresnet
+# checkpoints are written to checkpoints/<run_name> and also uploaded to W&B
 # export to ONNX
 python to_onnx.py ++init_weights=<path_to_model>
 # visualize graph with netron
@@ -42,3 +44,15 @@ python run.py --config-name bcresnet
 # or with overrides
 python run.py --config-name bcresnet ++model.width_mult=1.5
 ```
+
+## Hyperparameter sweeps with W&B
+
+Run a sweep with the provided config (tunes lr, width multiplier, batch size, grad clipping):
+
+```bash
+wandb sweep conf/sweeps/bcresnet.yaml
+# copy the sweep id printed above
+wandb agent <sweep_id>
+```
+
+You can change/extend the search space in `conf/sweeps/bcresnet.yaml`.

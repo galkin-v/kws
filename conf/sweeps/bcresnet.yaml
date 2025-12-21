@@ -1,0 +1,38 @@
+project: keyword-spotting
+program: run.py
+method: bayes
+name: bcresnet-sweep
+description: Sweep for BC-ResNet hyperparameters using Hydra overrides.
+metric:
+  name: val/accuracy
+  goal: maximize
+parameters:
+  optim.lr:
+    distribution: log_uniform_values
+    min: 1e-4
+    max: 5e-3
+  model.width_mult:
+    values:
+      - 0.75
+      - 1.0
+      - 1.25
+  train_dataloader.batch_size:
+    values:
+      - 64
+      - 96
+      - 128
+  trainer.accumulate_grad_batches:
+    values:
+      - 1
+      - 2
+  trainer.gradient_clip_val:
+    values:
+      - 0.5
+      - 1.0
+command:
+  - ${env}
+  - python
+  - run.py
+  - --config-name
+  - bcresnet
+  - ${args_no_hyphens}

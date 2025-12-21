@@ -12,6 +12,9 @@ def main(conf: omegaconf.DictConfig) -> None:
     seed_everything(314, workers=True)
     module = KWS(conf)
     logger = hydra.utils.instantiate(conf.logger)
+    if hasattr(logger, "watch"):
+        # track gradients/parameters in W&B when available
+        logger.watch(module.model, log="all", log_freq=100)
     trainer = hydra.utils.instantiate(conf.trainer, logger=logger)
     trainer.fit(module)
 
