@@ -300,7 +300,8 @@ class BCResNet(torch.nn.Module):
         self.blocks = torch.nn.Sequential(*blocks)
 
         # final projection
-        self.final_dw = torch.nn.Conv2d(in_ch, in_ch, kernel_size=(5, 5), padding=(0, 2), groups=in_ch)
+        # keep final conv small enough for low freq resolution after downsampling
+        self.final_dw = torch.nn.Conv2d(in_ch, in_ch, kernel_size=(3, 3), padding=(1, 1), groups=in_ch)
         self.final_pw = torch.nn.Conv2d(in_ch, base_width * 2, kernel_size=1)
         self.classifier = torch.nn.Sequential(
             torch.nn.AdaptiveAvgPool2d((1, 1)),
