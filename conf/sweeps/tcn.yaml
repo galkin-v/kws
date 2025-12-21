@@ -1,0 +1,30 @@
+project: keyword-spotting
+program: run.py
+method: bayes
+name: tcn-sweep
+description: Sweep for TCN hyperparameters under 10k params.
+metric:
+  name: val/accuracy
+  goal: maximize
+parameters:
+  optim.lr:
+    distribution: log_uniform_values
+    min: 5e-4
+    max: 3e-3
+  model.channels:
+    values: [18, 20, 22, 24]
+  model.head_hidden:
+    values: [24, 28, 32, 36]
+  model.dilations:
+    values:
+      - [1, 2, 4]
+      - [1, 2, 4, 8]
+  trainer.gradient_clip_val:
+    values: [0.5, 1.0]
+command:
+  - ${env}
+  - python
+  - run.py
+  - --config-name
+  - tcn
+  - ${args_no_hyphens}
