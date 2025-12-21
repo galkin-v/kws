@@ -8,11 +8,14 @@ model:
   _target_: src.model.BCResNet
   n_mels: 64
   n_classes: 5
-  base_width: 12
-  width_mult: 1.1
-  stages: [2, 2, 3, 3]
-  ssn_subbands: 4
+  base_width: 8
+  width_mult: 1.0
+  widths: [6, 8, 10, 12]
+  stages: [1, 1, 2, 2]
+  ssn_subbands: 3
   dropout: 0.05
+  classifier_hidden: 32
+  final_pw_channels: 16
   activation:
     _target_: torch.nn.SiLU
 

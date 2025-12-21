@@ -264,13 +264,16 @@ class BCResNet(torch.nn.Module):
         base_width: int = 16,
         width_mult: float = 1.0,
         stages: List[int] = [2, 2, 4, 4],
+        widths: List[int] | None = None,
         ssn_subbands: int = 5,
         dropout: float = 0.1,
         activation=torch.nn.ReLU(),
+        classifier_hidden: int = 128,
+        final_pw_channels: int | None = None,
     ):
         super().__init__()
         self.n_mels = n_mels
-        widths = [int(w * width_mult) for w in [8, 12, 16, 20]]
+        widths = widths or [int(w * width_mult) for w in [8, 12, 16, 20]]
         # front conv: (B, 1, F, T) -> (B, base_width, F', T)
         self.front = torch.nn.Sequential(
             torch.nn.Conv2d(1, base_width, kernel_size=(5, 5), padding=(2, 2), stride=(2, 1)),
@@ -302,13 +305,14 @@ class BCResNet(torch.nn.Module):
         # final projection
         # keep final conv small enough for low freq resolution after downsampling
         self.final_dw = torch.nn.Conv2d(in_ch, in_ch, kernel_size=(3, 3), padding=(1, 1), groups=in_ch)
-        self.final_pw = torch.nn.Conv2d(in_ch, base_width * 2, kernel_size=1)
+        pw_out = final_pw_channels or base_width * 2
+        self.final_pw = torch.nn.Conv2d(in_ch, pw_out, kernel_size=1)
         self.classifier = torch.nn.Sequential(
             torch.nn.AdaptiveAvgPool2d((1, 1)),
             torch.nn.Flatten(),
-            torch.nn.Linear(base_width * 2, 128),
+            torch.nn.Linear(pw_out, classifier_hidden),
             activation,
-            torch.nn.Linear(128, n_classes),
+            torch.nn.Linear(classifier_hidden, n_classes),
             torch.nn.LogSoftmax(dim=-1),
         )
 
