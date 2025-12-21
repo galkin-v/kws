@@ -221,6 +221,59 @@ class DSResNetLite(nn.Module):
         return self.head(x)
 
 
+class DSResNet10(nn.Module):
+    """Compact DS-ResNet10-inspired model (no residuals, ~10k params)."""
+
+    def __init__(
+        self,
+        in_features: int,
+        n_classes: int,
+        channels: int = 22,
+        n_layers: int = 7,
+        dilation_schedule: List[int] | None = None,
+        se_reduction: int = 8,
+        head_pool_kernel: int = 4,
+        head_pool_stride: int = 2,
+        activation: nn.Module = nn.ReLU(),
+    ):
+        super().__init__()
+        self.stem = nn.Sequential(
+            nn.Conv1d(in_features, channels, kernel_size=3, padding=1, stride=1, bias=False),
+            nn.BatchNorm1d(channels),
+            activation,
+        )
+        self.se = SE1d(channels, reduction=se_reduction)
+        self.head_pool = nn.AvgPool1d(kernel_size=head_pool_kernel, stride=head_pool_stride)
+        dilations = dilation_schedule or [1, 1, 2, 2, 4, 4, 8][:n_layers]
+        layers: list[nn.Module] = []
+        for d in dilations[:n_layers]:
+            padding = (3 - 1) * d // 2
+            layers.extend(
+                [
+                    nn.Conv1d(channels, channels, kernel_size=3, padding=padding, dilation=d, groups=channels, bias=False),
+                    nn.BatchNorm1d(channels),
+                    activation,
+                    nn.Conv1d(channels, channels, kernel_size=1, bias=False),
+                    nn.BatchNorm1d(channels),
+                    activation,
+                ]
+            )
+        self.blocks = nn.Sequential(*layers)
+        self.head = nn.Sequential(
+            nn.AdaptiveAvgPool1d(1),
+            nn.Flatten(),
+            nn.Linear(channels, n_classes),
+            nn.LogSoftmax(dim=-1),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.stem(x)
+        x = self.se(x)
+        x = self.head_pool(x)
+        x = self.blocks(x)
+        return self.head(x)
+
+
 class TCNBlock(nn.Module):
     def __init__(self, channels: int, dilation: int, kernel_size: int = 5, activation: nn.Module = nn.SiLU()):
         super().__init__()
