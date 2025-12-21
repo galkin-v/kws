@@ -59,6 +59,58 @@ class Conv1dNet(torch.nn.Module):
         return self.model(spectrogram)
 
 
+class DepthwiseConv1dNet(torch.nn.Module):
+    """Lightweight depthwise-separable 1D conv model for KWS."""
+
+    def __init__(
+        self,
+        in_features: int,
+        n_classes: int,
+        channels: List[int],
+        activation: torch.nn.Module = torch.nn.SiLU(),
+        kernel_size: int = 5,
+        stride: int = 2,
+    ):
+        super().__init__()
+        features = in_features
+        layers: list[torch.nn.Module] = []
+
+        for ch in channels:
+            padding = kernel_size // 2
+            layers.extend(
+                [
+                    torch.nn.Conv1d(
+                        in_channels=features,
+                        out_channels=features,
+                        kernel_size=kernel_size,
+                        stride=stride,
+                        padding=padding,
+                        groups=features,
+                    ),
+                    torch.nn.BatchNorm1d(features),
+                    activation,
+                    torch.nn.Conv1d(features, ch, kernel_size=1),
+                    torch.nn.BatchNorm1d(ch),
+                    activation,
+                ]
+            )
+            features = ch
+
+        layers.extend(
+            [
+                torch.nn.AdaptiveAvgPool1d(1),
+                torch.nn.Flatten(),
+                torch.nn.Linear(features, n_classes),
+                torch.nn.LogSoftmax(dim=-1),
+            ]
+        )
+
+        self.model = torch.nn.Sequential(*layers)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.model(x)
+
+
 class SubSpectralNorm(torch.nn.Module):
     """SubSpectral Normalization (SSN) that splits the frequency axis into
     sub-bands and applies BatchNorm per sub-band as described in the paper.
