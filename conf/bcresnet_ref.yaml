@@ -6,8 +6,9 @@ run_name: ${hydra:job.name}-${now:%Y%m%d-%H%M%S}
 
 model:
   _target_: src.model.BCResNetRef
+  n_classes: 5
+  num_classes: ${model.n_classes}
   base_c: 8
-  num_classes: 5
 
 train_dataloader:
   _target_: torch.utils.data.DataLoader

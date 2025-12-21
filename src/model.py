@@ -823,9 +823,9 @@ def _bcblock_stage_ref(num_layers, last_channel, cur_channel, idx, use_stride):
 
 
 class BCResNetRef(nn.Module):
-    def __init__(self, base_c: int = 8, num_classes: int = 5):
+    def __init__(self, base_c: int = 8, num_classes: int = 5, n_classes: int | None = None):
         super().__init__()
-        self.num_classes = num_classes
+        self.num_classes = n_classes or num_classes
         self.n = [2, 2, 4, 4]
         self.c = [
             base_c * 2,
