@@ -2,6 +2,7 @@ from typing import List
 
 import torch
 import torch.nn.functional as F
+from torch import nn
 
 
 class Conv1dNet(torch.nn.Module):
@@ -58,6 +59,379 @@ class Conv1dNet(torch.nn.Module):
     def forward(self, spectrogram: torch.Tensor) -> torch.Tensor:
         return self.model(spectrogram)
 
+
+class CRNNNet(torch.nn.Module):
+    """Tiny CRNN with depthwise conv front-end and BiGRU backend."""
+
+    def __init__(
+        self,
+        in_features: int,
+        n_classes: int,
+        conv_channels: List[int],
+        rnn_hidden: int,
+        kernel_size: int = 5,
+        stride: int = 2,
+        activation: torch.nn.Module = torch.nn.SiLU(),
+    ):
+        super().__init__()
+        features = in_features
+        conv_layers: list[nn.Module] = []
+        for ch in conv_channels:
+            padding = kernel_size // 2
+            conv_layers.extend(
+                [
+                    nn.Conv1d(
+                        features,
+                        features,
+                        kernel_size=kernel_size,
+                        stride=stride,
+                        padding=padding,
+                        groups=features,
+                    ),
+                    nn.BatchNorm1d(features),
+                    activation,
+                    nn.Conv1d(features, ch, kernel_size=1),
+                    nn.BatchNorm1d(ch),
+                    activation,
+                ]
+            )
+            features = ch
+        self.conv = nn.Sequential(*conv_layers)
+        self.rnn = nn.GRU(
+            input_size=features, hidden_size=rnn_hidden, num_layers=1, batch_first=True, bidirectional=True
+        )
+        self.head = nn.Sequential(
+            nn.Linear(rnn_hidden * 2, rnn_hidden),
+            activation,
+            nn.Linear(rnn_hidden, n_classes),
+            nn.LogSoftmax(dim=-1),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (B, F, T)
+        x = self.conv(x)  # (B, C, T')
+        x = x.transpose(1, 2)  # (B, T', C)
+        y, _ = self.rnn(x)
+        # pool over time
+        y = y.mean(dim=1)
+        return self.head(y)
+
+
+class SE1d(nn.Module):
+    def __init__(self, channels: int, reduction: int = 8):
+        super().__init__()
+        hidden = max(1, channels // reduction)
+        self.fc = nn.Sequential(
+            nn.AdaptiveAvgPool1d(1),
+            nn.Flatten(),
+            nn.Linear(channels, hidden),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden, channels),
+            nn.Sigmoid(),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        scale = self.fc(x).unsqueeze(-1)
+        return x * scale
+
+
+class DSResBlock1d(nn.Module):
+    def __init__(
+        self,
+        in_ch: int,
+        out_ch: int,
+        stride: int = 1,
+        expand_ratio: float = 1.5,
+        se_reduction: int = 8,
+        activation: nn.Module = nn.SiLU(),
+    ):
+        super().__init__()
+        hidden = max(out_ch, int(in_ch * expand_ratio))
+        self.pw_expand = nn.Conv1d(in_ch, hidden, kernel_size=1)
+        self.dw = nn.Conv1d(hidden, hidden, kernel_size=3, padding=1, stride=stride, groups=hidden)
+        self.se = SE1d(hidden, reduction=se_reduction)
+        self.pw_proj = nn.Conv1d(hidden, out_ch, kernel_size=1)
+        self.bn1 = nn.BatchNorm1d(hidden)
+        self.bn2 = nn.BatchNorm1d(hidden)
+        self.bn3 = nn.BatchNorm1d(out_ch)
+        self.act = activation
+        self.use_res = stride == 1 and in_ch == out_ch
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        out = self.pw_expand(x)
+        out = self.act(self.bn1(out))
+        out = self.dw(out)
+        out = self.act(self.bn2(out))
+        out = self.se(out)
+        out = self.pw_proj(out)
+        out = self.bn3(out)
+        if self.use_res:
+            out = out + x
+        return self.act(out)
+
+
+class DSResNetLite(nn.Module):
+    """Depthwise-separable ResNet-lite with SE."""
+
+    def __init__(
+        self,
+        in_features: int,
+        n_classes: int,
+        widths: List[int],
+        strides: List[int],
+        stem_width: int = 16,
+        activation: nn.Module = nn.SiLU(),
+        expand_ratio: float = 1.5,
+        se_reduction: int = 8,
+        head_hidden: int = 64,
+    ):
+        super().__init__()
+        self.stem = nn.Sequential(
+            nn.Conv1d(in_features, stem_width, kernel_size=3, padding=1, stride=2),
+            nn.BatchNorm1d(stem_width),
+            activation,
+        )
+        layers: list[nn.Module] = []
+        in_ch = stem_width
+        for w, s in zip(widths, strides):
+            layers.append(
+                DSResBlock1d(
+                    in_ch,
+                    w,
+                    stride=s,
+                    expand_ratio=expand_ratio,
+                    se_reduction=se_reduction,
+                    activation=activation,
+                )
+            )
+            in_ch = w
+        self.blocks = nn.Sequential(*layers)
+        self.head = nn.Sequential(
+            nn.AdaptiveAvgPool1d(1),
+            nn.Flatten(),
+            nn.Linear(in_ch, head_hidden),
+            activation,
+            nn.Linear(head_hidden, n_classes),
+            nn.LogSoftmax(dim=-1),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.stem(x)
+        x = self.blocks(x)
+        return self.head(x)
+
+
+class TCNBlock(nn.Module):
+    def __init__(self, channels: int, dilation: int, kernel_size: int = 5, activation: nn.Module = nn.SiLU()):
+        super().__init__()
+        padding = (kernel_size - 1) * dilation // 2
+        self.conv = nn.Conv1d(
+            channels, channels, kernel_size=kernel_size, padding=padding, dilation=dilation, groups=channels
+        )
+        self.bn = nn.BatchNorm1d(channels)
+        self.pw = nn.Conv1d(channels, channels, kernel_size=1)
+        self.act = activation
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        out = self.conv(x)
+        out = self.act(self.bn(out))
+        out = self.pw(out)
+        return self.act(out + x)
+
+
+class TCNNet(nn.Module):
+    """Dilated depthwise TCN stack."""
+
+    def __init__(
+        self,
+        in_features: int,
+        n_classes: int,
+        channels: int = 32,
+        dilations: List[int] = [1, 2, 4, 8],
+        activation: nn.Module = nn.SiLU(),
+        head_hidden: int = 48,
+    ):
+        super().__init__()
+        self.stem = nn.Sequential(
+            nn.Conv1d(in_features, channels, kernel_size=3, padding=1, stride=2),
+            nn.BatchNorm1d(channels),
+            activation,
+        )
+        self.blocks = nn.Sequential(
+            *[TCNBlock(channels, d, kernel_size=5, activation=activation) for d in dilations]
+        )
+        self.head = nn.Sequential(
+            nn.AdaptiveAvgPool1d(1),
+            nn.Flatten(),
+            nn.Linear(channels, head_hidden),
+            activation,
+            nn.Linear(head_hidden, n_classes),
+            nn.LogSoftmax(dim=-1),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.stem(x)
+        x = self.blocks(x)
+        return self.head(x)
+
+
+class TinyConformerBlock(nn.Module):
+    def __init__(
+        self,
+        d_model: int,
+        n_heads: int = 2,
+        ff_mult: int = 2,
+        conv_kernel: int = 15,
+        dropout: float = 0.1,
+    ):
+        super().__init__()
+        self.ln1 = nn.LayerNorm(d_model)
+        self.mha = nn.MultiheadAttention(d_model, n_heads, dropout=dropout, batch_first=True)
+        self.ln2 = nn.LayerNorm(d_model)
+        self.ffn = nn.Sequential(
+            nn.Linear(d_model, d_model * ff_mult),
+            nn.SiLU(),
+            nn.Dropout(dropout),
+            nn.Linear(d_model * ff_mult, d_model),
+        )
+        self.ln3 = nn.LayerNorm(d_model)
+        self.conv = nn.Sequential(
+            nn.Conv1d(d_model, d_model, kernel_size=1),
+            nn.SiLU(),
+            nn.Conv1d(
+                d_model,
+                d_model,
+                kernel_size=conv_kernel,
+                padding=conv_kernel // 2,
+                groups=d_model,
+            ),
+            nn.SiLU(),
+            nn.Conv1d(d_model, d_model, kernel_size=1),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (B, T, D)
+        y = self.ln1(x)
+        y, _ = self.mha(y, y, y, need_weights=False)
+        x = x + y
+        y = self.ffn(self.ln2(x))
+        x = x + y
+        y = self.conv(self.ln3(x).transpose(1, 2)).transpose(1, 2)
+        return x + y
+
+
+class TinyConformerNet(nn.Module):
+    def __init__(
+        self,
+        n_mels: int,
+        n_classes: int,
+        d_model: int = 48,
+        n_heads: int = 2,
+        ff_mult: int = 2,
+        conv_kernel: int = 15,
+        dropout: float = 0.1,
+    ):
+        super().__init__()
+        self.subsample = nn.Sequential(
+            nn.Conv2d(1, 16, kernel_size=(3, 3), stride=(2, 2), padding=1),
+            nn.SiLU(),
+            nn.Conv2d(16, d_model, kernel_size=(3, 3), stride=(2, 1), padding=1),
+            nn.SiLU(),
+        )
+        self.block = TinyConformerBlock(
+            d_model=d_model,
+            n_heads=n_heads,
+            ff_mult=ff_mult,
+            conv_kernel=conv_kernel,
+            dropout=dropout,
+        )
+        self.head = nn.Sequential(
+            nn.LayerNorm(d_model),
+            nn.Linear(d_model, n_classes),
+            nn.LogSoftmax(dim=-1),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (B, F, T)
+        x = x.unsqueeze(1)  # (B,1,F,T)
+        x = self.subsample(x)  # (B, C, F', T')
+        x = x.mean(dim=2)  # pool freq -> (B, C, T')
+        x = x.transpose(1, 2)  # (B, T', C)
+        x = self.block(x)
+        x = x.mean(dim=1)
+        return self.head(x)
+
+
+class MBConv(nn.Module):
+    def __init__(self, in_ch: int, out_ch: int, expansion: int, kernel_size: int, stride, se_reduction: int = 8):
+        super().__init__()
+        hidden = in_ch * expansion
+        self.use_res = (stride == 1 or stride == (1, 1)) and in_ch == out_ch
+        self.expand = nn.Sequential(
+            nn.Conv2d(in_ch, hidden, kernel_size=1),
+            nn.BatchNorm2d(hidden),
+            nn.SiLU(),
+        )
+        self.dw = nn.Sequential(
+            nn.Conv2d(hidden, hidden, kernel_size=kernel_size, stride=stride, padding=kernel_size // 2, groups=hidden),
+            nn.BatchNorm2d(hidden),
+            nn.SiLU(),
+        )
+        self.se_reduce = nn.Conv2d(hidden, max(1, hidden // se_reduction), kernel_size=1)
+        self.se_expand = nn.Conv2d(max(1, hidden // se_reduction), hidden, kernel_size=1)
+        self.pw = nn.Sequential(
+            nn.Conv2d(hidden, out_ch, kernel_size=1),
+            nn.BatchNorm2d(out_ch),
+        )
+        self.act = nn.SiLU()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        y = self.expand(x)
+        y = self.dw(y)
+        se = y.mean(dim=[2, 3], keepdim=True)
+        se = self.se_reduce(se)
+        se = self.act(se)
+        se = self.se_expand(se).sigmoid()
+        y = y * se
+        y = self.pw(y)
+        if self.use_res:
+            y = y + x
+        return self.act(y)
+
+
+class MobileNetV3Small2D(nn.Module):
+    def __init__(
+        self,
+        n_mels: int,
+        n_classes: int,
+        widths: List[int] = [12, 16, 20],
+    ):
+        super().__init__()
+        self.stem = nn.Sequential(
+            nn.Conv2d(1, widths[0], kernel_size=3, stride=(2, 1), padding=1),
+            nn.BatchNorm2d(widths[0]),
+            nn.SiLU(),
+        )
+        blocks = []
+        in_ch = widths[0]
+        strides = [(2, 2), (2, 1), (1, 1)]
+        for out_ch, s in zip(widths[1:], strides):
+            blocks.append(MBConv(in_ch, out_ch, expansion=2, kernel_size=3, stride=s[0], se_reduction=8))
+            in_ch = out_ch
+        self.blocks = nn.Sequential(*blocks)
+        self.head = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
+            nn.Linear(in_ch, n_classes),
+            nn.LogSoftmax(dim=-1),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (B, F, T)
+        x = x.unsqueeze(1)
+        x = self.stem(x)
+        x = self.blocks(x)
+        return self.head(x)
 
 class DepthwiseConv1dNet(torch.nn.Module):
     """Lightweight depthwise-separable 1D conv model for KWS."""
@@ -328,3 +702,169 @@ class BCResNet(torch.nn.Module):
         x = self.final_dw(x)
         x = self.final_pw(x)
         return self.classifier(x)
+
+
+# Reference BC-ResNet implementation (closer to Qualcomm original)
+class ConvBNReLURef(nn.Module):
+    def __init__(
+        self,
+        in_plane,
+        out_plane,
+        idx,
+        kernel_size=3,
+        stride=1,
+        groups=1,
+        use_dilation=False,
+        activation=True,
+        swish=False,
+        BN=True,
+        ssn=False,
+    ):
+        super().__init__()
+
+        def get_padding(k_size, use_dil):
+            rate = 1
+            padding_len = (k_size - 1) // 2
+            if use_dil and k_size > 1:
+                rate = int(2**self.idx)
+                padding_len = rate * padding_len
+            return padding_len, rate
+
+        self.idx = idx
+
+        if isinstance(kernel_size, (list, tuple)):
+            padding = []
+            rate = []
+            for k_size in kernel_size:
+                temp_padding, temp_rate = get_padding(k_size, use_dilation)
+                rate.append(temp_rate)
+                padding.append(temp_padding)
+        else:
+            padding, rate = get_padding(kernel_size, use_dilation)
+
+        layers = [
+            nn.Conv2d(in_plane, out_plane, kernel_size, stride, padding, rate, groups, bias=False)
+        ]
+        if ssn:
+            layers.append(SubSpectralNorm(out_plane, 5))
+        elif BN:
+            layers.append(nn.BatchNorm2d(out_plane))
+        if swish:
+            layers.append(nn.SiLU(True))
+        elif activation:
+            layers.append(nn.ReLU(True))
+        self.block = nn.Sequential(*layers)
+
+    def forward(self, x):
+        return self.block(x)
+
+
+class BCResBlockRef(nn.Module):
+    def __init__(self, in_plane, out_plane, idx, stride):
+        super().__init__()
+        self.transition_block = in_plane != out_plane
+        kernel_size = (3, 3)
+
+        layers = []
+        if self.transition_block:
+            layers.append(ConvBNReLURef(in_plane, out_plane, idx, 1, 1))
+            in_plane = out_plane
+        layers.append(
+            ConvBNReLURef(
+                in_plane,
+                out_plane,
+                idx,
+                (kernel_size[0], 1),
+                (stride[0], 1),
+                groups=in_plane,
+                ssn=True,
+                activation=False,
+            )
+        )
+        self.f2 = nn.Sequential(*layers)
+        self.avg_gpool = nn.AdaptiveAvgPool2d((1, None))
+
+        self.f1 = nn.Sequential(
+            ConvBNReLURef(
+                out_plane,
+                out_plane,
+                idx,
+                (1, kernel_size[1]),
+                (1, stride[1]),
+                groups=out_plane,
+                swish=True,
+                use_dilation=True,
+            ),
+            nn.Conv2d(out_plane, out_plane, 1, bias=False),
+            nn.Dropout2d(0.1),
+        )
+
+    def forward(self, x):
+        shortcut = x
+        x = self.f2(x)
+        aux_2d_res = x
+        x = self.avg_gpool(x)
+
+        x = self.f1(x)
+        x = x + aux_2d_res
+        if not self.transition_block:
+            x = x + shortcut
+        x = F.relu(x, True)
+        return x
+
+
+def _bcblock_stage_ref(num_layers, last_channel, cur_channel, idx, use_stride):
+    stage = nn.ModuleList()
+    channels = [last_channel] + [cur_channel] * num_layers
+    for i in range(num_layers):
+        stride = (2, 1) if use_stride and i == 0 else (1, 1)
+        stage.append(BCResBlockRef(channels[i], channels[i + 1], idx, stride))
+    return stage
+
+
+class BCResNetRef(nn.Module):
+    def __init__(self, base_c: int = 8, num_classes: int = 5):
+        super().__init__()
+        self.num_classes = num_classes
+        self.n = [2, 2, 4, 4]
+        self.c = [
+            base_c * 2,
+            base_c,
+            int(base_c * 1.5),
+            base_c * 2,
+            int(base_c * 2.5),
+            base_c * 4,
+        ]
+        self.s = [1, 2]
+        self._build_network()
+
+    def _build_network(self):
+        self.cnn_head = nn.Sequential(
+            nn.Conv2d(1, self.c[0], 5, (2, 1), 2, bias=False),
+            nn.BatchNorm2d(self.c[0]),
+            nn.ReLU(True),
+        )
+        self.BCBlocks = nn.ModuleList([])
+        for idx, n in enumerate(self.n):
+            use_stride = idx in self.s
+            self.BCBlocks.append(_bcblock_stage_ref(n, self.c[idx], self.c[idx + 1], idx, use_stride))
+
+        self.classifier = nn.Sequential(
+            nn.Conv2d(self.c[-2], self.c[-2], (5, 5), bias=False, groups=self.c[-2], padding=(0, 2)),
+            nn.Conv2d(self.c[-2], self.c[-1], 1, bias=False),
+            nn.BatchNorm2d(self.c[-1]),
+            nn.ReLU(True),
+            nn.AdaptiveAvgPool2d((1, 1)),
+            nn.Conv2d(self.c[-1], self.num_classes, 1),
+        )
+
+    def forward(self, x):
+        if x.dim() == 3:
+            x = x.unsqueeze(1)
+        x = self.cnn_head(x)
+        for i, num_modules in enumerate(self.n):
+            for j in range(num_modules):
+                x = self.BCBlocks[i][j](x)
+        x = self.classifier(x)
+        x = x.view(-1, x.shape[1])
+        return F.log_softmax(x, dim=-1)

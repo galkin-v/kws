@@ -1,21 +1,18 @@
-init_weights: lightning_logs/version_1/checkpoints/epoch=10-step=7980.ckpt
-apply_prior_correction: false
-prior_source: val  # 'val' to use val priors as target, 'predict' to use predict/test priors
-prior_alpha: 30
+init_weights:
 run_name: ${hydra:job.name}-${now:%Y%m%d-%H%M%S}
+
 model:
-  _target_: src.model.BCResNet
-  # concrete mel-bin size to avoid recursive interpolation with dataloader transforms
-  n_mels: 64
-  # number of classes (set explicitly to avoid unsupported 'len' interpolation)
-  n_classes: 5
-  base_width: 16
-  width_mult: 1.0
-  stages: [2, 2, 4, 4]
-  ssn_subbands: 5
-  dropout: 0.1
+  _target_: src.model.CRNNNet
+  in_features: 64
+  n_classes: ${len:${train_dataloader.dataset.idx_to_keyword}}
+  conv_channels:
+    - 12
+    - 18
+  rnn_hidden: 20
+  kernel_size: 5
+  stride: 2
   activation:
-    _target_: torch.nn.ReLU
+    _target_: torch.nn.SiLU
 
 train_dataloader:
   _target_: torch.utils.data.DataLoader
@@ -39,7 +36,7 @@ train_dataloader:
         n_fft: 400
         win_length: 400
         hop_length: 160
-        n_mels: ${model.n_mels}
+        n_mels: ${model.in_features}
       - _target_: src.data.SpecScaler
 
 val_dataloader:
@@ -91,7 +88,8 @@ logger:
   log_model: True
   name: ${run_name}
   tags:
-    - bcresnet
+    - crnn
+
 callbacks:
   - _target_: pytorch_lightning.callbacks.ModelCheckpoint
     dirpath: checkpoints/${run_name}
@@ -100,7 +98,7 @@ callbacks:
     mode: max
     save_top_k: 1
     save_last: True
-  
+
 optim:
   _target_: torch.optim.Adam
-  lr: 2e-3
+  lr: 1e-3

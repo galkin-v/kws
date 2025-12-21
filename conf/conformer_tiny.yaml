@@ -1,23 +1,15 @@
 init_weights:
-apply_prior_correction: false
-prior_source: val
-prior_alpha: 30
 run_name: ${hydra:job.name}-${now:%Y%m%d-%H%M%S}
 
 model:
-  _target_: src.model.BCResNet
+  _target_: src.model.TinyConformerNet
   n_mels: 64
-  n_classes: 5
-  base_width: 6
-  width_mult: 1.0
-  widths: [4, 5, 6, 7]
-  stages: [1, 1, 2, 2]
-  ssn_subbands: 3
+  n_classes: ${len:${train_dataloader.dataset.idx_to_keyword}}
+  d_model: 20
+  n_heads: 2
+  ff_mult: 2
+  conv_kernel: 9
   dropout: 0.05
-  classifier_hidden: 24
-  final_pw_channels: 12
-  activation:
-    _target_: torch.nn.SiLU
 
 train_dataloader:
   _target_: torch.utils.data.DataLoader
@@ -93,8 +85,8 @@ logger:
   log_model: True
   name: ${run_name}
   tags:
-    - bcresnet
-    - slim
+    - conformer
+    - tiny
 
 callbacks:
   - _target_: pytorch_lightning.callbacks.ModelCheckpoint
@@ -107,4 +99,4 @@ callbacks:
 
 optim:
   _target_: torch.optim.Adam
-  lr: 2e-3
+  lr: 1e-3
