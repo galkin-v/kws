@@ -13,7 +13,7 @@ from utils import omegaconf_extension
 
 
 @omegaconf_extension
-@hydra.main(version_base="1.2", config_path="conf", config_name="bcresnet.yaml")
+@hydra.main(version_base="1.2", config_path="conf", config_name="tcn.yaml")
 def main(conf: omegaconf.DictConfig) -> None:
 
     os.chdir(hydra.utils.get_original_cwd())
