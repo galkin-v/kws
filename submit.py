@@ -1,3 +1,4 @@
+import glob
 import os
 from typing import List, Tuple
 
@@ -5,6 +6,7 @@ import hydra
 import omegaconf
 import pandas as pd
 import torch
+import yaml
 
 from src.module import KWS
 from utils import omegaconf_extension
@@ -15,6 +17,41 @@ from utils import omegaconf_extension
 def main(conf: omegaconf.DictConfig) -> None:
 
     os.chdir(hydra.utils.get_original_cwd())
+
+    def apply_sweep_config(path: str):
+        with open(path, "r") as f:
+            sweep_cfg = yaml.safe_load(f)
+        struct_state = omegaconf.OmegaConf.is_struct(conf)
+        omegaconf.OmegaConf.set_struct(conf, False)
+        for key, val in sweep_cfg.items():
+            if isinstance(val, dict) and "value" in val:
+                val = val["value"]
+            try:
+                omegaconf.OmegaConf.update(conf, key, val, merge=True)
+            except Exception:
+                pass
+        omegaconf.OmegaConf.set_struct(conf, struct_state)
+
+    # Apply overrides from a W&B sweep run by run name or explicit path
+    sweep_cfg_path = conf.get("sweep_config_path")
+    if conf.get("is_sweep", False) and not sweep_cfg_path:
+        run_name = conf.get("sweep_run_name") or conf.get("run_name")
+        if not run_name:
+            raise ValueError("is_sweep=True requires sweep_run_name or run_name to locate config")
+        candidates = []
+        for pat in [
+            os.path.join("wandb", f"{run_name}*/files/config*.yaml"),
+            os.path.join("wandb", "wandb", f"{run_name}*/files/config*.yaml"),
+        ]:
+            candidates.extend(glob.glob(pat))
+        if not candidates:
+            raise FileNotFoundError(f"No W&B config found for run name '{run_name}'")
+        sweep_cfg_path = sorted(candidates)[0]
+
+    if sweep_cfg_path:
+        if not os.path.isfile(sweep_cfg_path):
+            raise FileNotFoundError(f"sweep_config_path not found: {sweep_cfg_path}")
+        apply_sweep_config(sweep_cfg_path)
 
     module = KWS(conf)
     if conf.init_weights:
