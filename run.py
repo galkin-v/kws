@@ -7,7 +7,7 @@ from utils import omegaconf_extension
 
 
 @omegaconf_extension
-@hydra.main(version_base="1.2", config_path="conf", config_name="bcresnet.yaml")
+@hydra.main(version_base="1.2", config_path="conf", config_name="tcn.yaml")
 def main(conf: omegaconf.DictConfig) -> None:
     seed_everything(314, workers=True)
     module = KWS(conf)
